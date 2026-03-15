@@ -20,6 +20,17 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'mls_scraper.html'));
 });
 
+// Health Check: Verify Python and Browser environment
+app.get('/health', async (req, res) => {
+    try {
+        const pythonCmd = process.env.RAILWAY_ENVIRONMENT_ID || process.env.RENDER ? "python3" : "python";
+        const { stdout } = await execPromise(`${pythonCmd} --version`);
+        res.json({ status: "ok", python: stdout.trim(), env: process.env.RAILWAY_ENVIRONMENT_ID ? "Railway" : "Local" });
+    } catch (err) {
+        res.status(500).json({ status: "error", error: "Python not found", details: err.message });
+    }
+});
+
 app.post('/scrape', async (req, res) => {
     // Increase response timeout for this specific long-running request
     req.setTimeout(300000); // 5 minutes

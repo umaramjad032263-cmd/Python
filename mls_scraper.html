@@ -371,6 +371,9 @@
                 : "";
 
             try {
+                // The provided instruction for the fetch call was syntactically incorrect
+                // and attempted to insert server-side route definitions into client-side JS.
+                // This change only addresses the client-side fetch call.
                 const response = await fetch(`${apiBase}/scrape`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -379,12 +382,12 @@
 
                 const data = await response.json();
 
-                // Server-side error (e.g. 500 error or custom error message)
-                if (data.status === "error" || data.error) {
-                    throw new Error(data.message || data.error || "Unknown server error");
+                if (response.status !== 200 || data.error) {
+                    const err = new Error(data.error || "Server Error");
+                    err.details = data.details || "";
+                    throw err;
                 }
 
-                // Verify data structure before calling display
                 if (data && (data.success && data.all_data)) {
                     displayData(data);
                 } else {
