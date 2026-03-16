@@ -20,7 +20,9 @@ def load_webshare_proxies():
     
     lines = []
     if env_proxies:
-        lines = env_proxies.strip().split("\n")
+        # Clean up common copy-paste artifacts like quotes
+        clean_env = env_proxies.strip().replace('"', '').replace("'", "")
+        lines = re.split(r'[\n\r,]+', clean_env)
     else:
         # Fallback to local file
         file_path = "Webshare 10 proxies.txt"
@@ -47,12 +49,13 @@ def extract_all_listings(html):
     all_found_properties = []
 
     # Strategy 1: Find real property containers (More inclusive selectors)
-    containers = soup.find_all(['div', 'form', 'tr', 'article'], 
-        class_=re.compile(r'd-displayContainer|d-item|property-card|j-container|listing-item|item-container', re.I))
+    containers = soup.find_all(['div', 'form', 'tr', 'article', 'section'], 
+        class_=re.compile(r'd-displayContainer|d-item|property-card|j-container|listing-item|item-container|result-item|listing-card', re.I))
     
-    # Also look for role-based containers
-    role_containers = soup.find_all('div', attrs={"role": "listitem"})
-    all_containers = containers + role_containers
+    # Also look for role-based containers and generic matrix items
+    role_containers = soup.find_all(['div', 'tr'], attrs={"role": ["listitem", "row"]})
+    matrix_items = soup.find_all('div', id=re.compile(r'd-item', re.I))
+    all_containers = containers + role_containers + matrix_items
 
     for container in all_containers:
         block_text = container.get_text("\n", strip=True)
@@ -181,14 +184,14 @@ async def perform_scrape(p_instance, url, proxy_config=None):
     print("STATUS: Data-Hunter Engine active. Starting full-length scan...", file=sys.stderr)
     # Detect if on a server (Render, Railway, Space)
     is_server = "SPACE_ID" in os.environ or "RENDER" in os.environ or "RAILWAY_ENVIRONMENT_ID" in os.environ
+    proxy_pool = load_webshare_proxies() if not proxy_config else [proxy_config]
     
     browser = None
     try:
-        # Force Headless on servers or if headless requested
+        # Launch browser without global proxy if we want to rotate per-context
         browser = await p_instance.chromium.launch(
             headless=True if is_server else False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--no-zygote"], 
-            proxy=proxy_config
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--no-zygote"]
         )
         
         # 403 Stealth Retry Loop
@@ -196,8 +199,9 @@ async def perform_scrape(p_instance, url, proxy_config=None):
         success = False
         page = None
         for attempt in range(max_retries):
+            current_proxy = random.choice(proxy_pool) if proxy_pool else None
             try:
-                # 1. Advanced Stealth Context (Always use browser proxy)
+                # 1. Advanced Stealth Context with explicit proxy rotation
                 ua_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 context = await browser.new_context(
                     user_agent=ua_str,
@@ -205,25 +209,30 @@ async def perform_scrape(p_instance, url, proxy_config=None):
                     device_scale_factor=1,
                     is_mobile=False,
                     has_touch=False,
-                    proxy=proxy_config
+                    proxy=current_proxy
                 )
                 page = await context.new_page()
                 
-                # 2. Automation Mask: Wipe webdriver footprint
+                # 2. Automation Mask
                 await page.add_init_script("""() => {
                     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 }""")
                 
-                print(f"STATUS: Accessing Portal (Attempt {attempt+1})...", file=sys.stderr)
+                print(f"STATUS: Accessing Portal (Attempt {attempt+1} via {current_proxy['server'] if current_proxy else 'Direct'})...", file=sys.stderr)
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(random.uniform(5, 8)) # Human jitter
+                await asyncio.sleep(random.uniform(8, 12)) # Longer wait for slow cloud proxies
                 
-                # 3. Block Detection
+                # 3. Block Detection & Content Verification
                 page_content = await page.content()
+                page_title = await page.title()
                 if response.status == 403 or "Forbidden" in page_content or "Access Denied" in page_content:
-                    print(f"WARNING: Attempt {attempt+1} blocked (403). Changing fingerprint...", file=sys.stderr)
+                    print(f"WARNING: Attempt {attempt+1} blocked (403). Rotating proxy...", file=sys.stderr)
                     await context.close()
                     continue
+                
+                # Check for "Empty" results vs "Blocked" results
+                if "No results matching" in page_content or "No properties found" in page_content:
+                     print(f"INFO: Portal reached. Page says: '{page_title}'. Search actually seems empty.", file=sys.stderr)
                 
                 success = True
                 break
@@ -232,10 +241,10 @@ async def perform_scrape(p_instance, url, proxy_config=None):
                 await asyncio.sleep(2)
 
         if not success:
-            raise Exception("The portal is currently blocking access (403 Forbidden). Try using a Proxy or wait a few minutes.")
+            raise Exception("The portal is currently blocking all attempts. Check your proxies or wait.")
 
         # Verification step: ensure frames exist
-        await asyncio.sleep(5)
+        await asyncio.sleep(6)
 
         all_results = []
         
@@ -318,13 +327,12 @@ async def main():
         use_proxy = "--proxy" in sys.argv
         
         async with async_playwright() as p:
-            proxy_pool = load_webshare_proxies() if use_proxy else []
-            proxy = random.choice(proxy_pool) if proxy_pool else None
-            results = await perform_scrape(p, url, proxy)
+            # Proxies are now handled inside perform_scrape for better rotation
+            results = await perform_scrape(p, url)
             if results and isinstance(results, list):
                 print(json.dumps({"success": True, "count": len(results), "data": results[0], "all_data": results}))
             else:
-                print(json.dumps({"error": "No properties found."}))
+                print(json.dumps({"error": "No properties found.", "debug": "Check server logs for title/content snippets."}))
     except Exception as e:
         print(json.dumps({"error": str(e)}))
 
