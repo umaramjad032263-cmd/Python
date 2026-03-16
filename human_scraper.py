@@ -185,13 +185,24 @@ async def perform_scrape(p_instance, url, proxy_config=None):
     # Detect if on a server (Render, Railway, Space)
     is_server = "SPACE_ID" in os.environ or "RENDER" in os.environ or "RAILWAY_ENVIRONMENT_ID" in os.environ
     proxy_pool = load_webshare_proxies() if not proxy_config else [proxy_config]
+    all_results = []
     
     browser = None
     try:
-        # Launch browser without global proxy if we want to rotate per-context
+        # Launch browser with maximum RAM-saving args for Railway/low-tier VPS
+        chrome_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--no-zygote",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--js-flags='--max-old-space-size=256'"
+        ]
+        
         browser = await p_instance.chromium.launch(
             headless=True if is_server else False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--no-zygote"]
+            args=chrome_args
         )
         
         # 403 Stealth Retry Loop
@@ -201,11 +212,11 @@ async def perform_scrape(p_instance, url, proxy_config=None):
         for attempt in range(max_retries):
             current_proxy = random.choice(proxy_pool) if proxy_pool else None
             try:
-                # 1. Advanced Stealth Context with explicit proxy rotation
+                # 1. Advanced Stealth Context
                 ua_str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 context = await browser.new_context(
                     user_agent=ua_str,
-                    viewport={"width": random.randint(1280, 1920), "height": random.randint(720, 1080)},
+                    viewport={"width": 1024, "height": 768}, # Smaller viewport saves RAM
                     device_scale_factor=1,
                     is_mobile=False,
                     has_touch=False,
@@ -309,13 +320,21 @@ async def perform_scrape(p_instance, url, proxy_config=None):
             all_results = unique_found
             
             await asyncio.sleep(0.5)
-            if i % 3 == 0: print(f"STATUS: Mining Stage {i+1}/30 (Found: {len(all_results)} listings)...", file=sys.stderr)
+            if i % 3 == 0: print(f"STATUS: Mining Stage {i+1}/20 (Found: {len(all_results)} listings)...", file=sys.stderr)
+            if i >= 19: break # Cap at 20 stages for memory safety
 
         print(f"STATUS: Finalizing {len(all_results)} listings...", file=sys.stderr)
         return all_results
 
     except Exception as e:
-        print(f"ERROR: {traceback.format_exc()}", file=sys.stderr)
+        err_msg = str(e)
+        print(f"ERROR Cache: {err_msg}", file=sys.stderr)
+        # If the browser crashed (Page crashed / Target closed) but we found results, return them!
+        if all_results and len(all_results) > 0:
+            print(f"WARNING: Browser crashed or timed out, but salvaged {len(all_results)} listings.", file=sys.stderr)
+            return all_results
+        
+        print(f"ERROR Details: {traceback.format_exc()}", file=sys.stderr)
         return []
     finally:
         if browser: await browser.close()
