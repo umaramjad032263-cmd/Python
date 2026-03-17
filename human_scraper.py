@@ -5,6 +5,7 @@ import sys
 import re
 import os
 import traceback
+import gc
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
@@ -197,7 +198,8 @@ async def perform_scrape(p_instance, url, proxy_config=None):
             "--no-zygote",
             "--disable-gpu",
             "--disable-extensions",
-            "--js-flags='--max-old-space-size=256'"
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--js-flags=--max-old-space-size=256"
         ]
         
         browser = await p_instance.chromium.launch(
@@ -263,7 +265,7 @@ async def perform_scrape(p_instance, url, proxy_config=None):
         await page.mouse.move(1000, 500)
         await page.mouse.click(1000, 500)
 
-        for i in range(30):
+        for i in range(12): # Reduced from 30 for RAM safety
             # 1. Physical & JS Scroll
             await page.mouse.wheel(0, 1800)
             await page.evaluate("""() => {
@@ -299,13 +301,20 @@ async def perform_scrape(p_instance, url, proxy_config=None):
 
             # 3. Continuous Snapshot Capture (Captured every stage for 100% coverage)
             snap_html = await page.content()
-            for frame in page.frames:
-                try:
-                    f_html = await frame.content()
-                    if len(f_html) > 500: snap_html += "\n" + f_html
-                except: continue
+            # Only check frames if memory isn't too tight; keep it simple
+            if len(page.frames) < 5:
+                for frame in page.frames:
+                    if frame == page.main_frame: continue
+                    try:
+                        f_html = await frame.content()
+                        if len(f_html) > 500: snap_html += "\n" + f_html
+                    except: continue
             
             new_listings = extract_all_listings(snap_html)
+            
+            # Help GC
+            snap_html = None
+            gc.collect()
             all_results.extend(new_listings)
             
             # 4. Live Deduplication (High-Resolution Signature)
@@ -321,7 +330,8 @@ async def perform_scrape(p_instance, url, proxy_config=None):
             
             await asyncio.sleep(0.5)
             if i % 3 == 0: print(f"STATUS: Mining Stage {i+1}/20 (Found: {len(all_results)} listings)...", file=sys.stderr)
-            if i >= 19: break # Cap at 20 stages for memory safety
+            if i >= 9: break # Cap at 10 stages for memory safety
+            if len(all_results) >= 50: break # Result cap for RAM safety
 
         print(f"STATUS: Finalizing {len(all_results)} listings...", file=sys.stderr)
         return all_results

@@ -59,13 +59,38 @@ app.post('/scrape', async (req, res) => {
             return res.status(500).json({ error: "Scrape Failed", details: stderr });
         }
 
-        const jsonMatch = stdout.match(/\{.*\}/s);
-        if (!jsonMatch) {
-            console.error("❌ Invalid Engine Output:", stdout);
-            return res.status(500).json({ error: "No data returned from scraper engine." });
+        // Robust JSON extraction: Find the last valid JSON block in the output
+        const lines = stdout.split('\n');
+        let result = null;
+        
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i].trim();
+            if (line.startsWith('{') && line.endsWith('}')) {
+                try {
+                    result = JSON.parse(line);
+                    if (result.success || result.error || result.count !== undefined) {
+                        break; 
+                    }
+                } catch (e) {
+                    // Try to extract JSON from within the line if it's not a pure JSON line
+                    const match = line.match(/\{.*\}/);
+                    if (match) {
+                        try {
+                            result = JSON.parse(match[0]);
+                            break;
+                        } catch (innerE) {}
+                    }
+                }
+            }
         }
 
-        const result = JSON.parse(jsonMatch[0]);
+        if (!result) {
+            console.error("❌ Failed to parse Engine Output. Raw Output Snippet:", stdout.slice(-200));
+            return res.status(500).json({ 
+                error: "No valid data returned from scraper engine.",
+                debug: stdout.length > 500 ? stdout.slice(-200) : stdout
+            });
+        }
 
         // Add ngrok bypass header to ensure the response gets through
         res.setHeader('ngrok-skip-browser-warning', 'true');
