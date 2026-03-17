@@ -1,3 +1,4 @@
+console.log("INTERNAL: Server process initiated. Loading modules...");
 import express from 'express';
 import cors from 'cors';
 import { exec } from 'child_process';
